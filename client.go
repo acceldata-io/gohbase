@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tsuna/gohbase/auth"
 	"github.com/tsuna/gohbase/compression"
 	"github.com/tsuna/gohbase/hrpc"
 	"github.com/tsuna/gohbase/pb"
@@ -117,6 +118,11 @@ type client struct {
 	scanControlOptions *region.ScanControlOptions
 	// batch requests control options for concurrency control
 	batchRequestsControlOptions *region.BatchRequestsControlOptions
+
+	// krbClient
+	krbClient auth.KerberosClient
+
+	krbAuthSPN string
 }
 
 // NewClient creates a new HBase client.
@@ -166,6 +172,31 @@ func newClient(zkquorum string, options ...Option) *client {
 	}
 
 	return c
+}
+
+func WithKerberosAuth(krbClient auth.KerberosClient, spn string) Option {
+	return func(c *client) {
+		c.krbClient = krbClient
+		c.krbAuthSPN = spn
+
+		c.regionDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialer := &net.Dialer{Timeout: c.regionReadTimeout}
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, fmt.Errorf("tcp dial failed to %s: %w", addr, err)
+			}
+
+			err = c.krbClient.PerformSASLHandshake(conn, c.krbAuthSPN)
+			if err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("kerberos sasl handshake failed for %s: %w", c.krbAuthSPN, err)
+			}
+
+			return conn, nil
+		}
+
+		c.logger.Info("Kerberos region dialer configured", "SPN", spn)
+	}
 }
 
 // DebugState information about the clients keyRegionCache, and clientRegionCache
