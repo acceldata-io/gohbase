@@ -175,28 +175,37 @@ func newClient(zkquorum string, options ...Option) *client {
 	return c
 }
 
-func WithKerberosAuth(krbClient auth.KerberosClient, spn string) Option {
+func WithKerberosAuth(krbClient auth.KerberosClient, baseService, realm string) Option {
 	return func(c *client) {
 		c.krbClient = krbClient
-		c.krbAuthSPN = spn
 
 		c.regionDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// 1. Extract hostname from "hostname:port"
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				// Fallback if addr doesn't have a port
+				host = addr
+			}
+
+			// 2. Construct the exact SPN for THIS specific connection
+			// Example: "hbase/node-01.example.com@EXAMPLE.COM"
+			dynamicSPN := fmt.Sprintf("%s/%s@%s", baseService, host, realm)
+
 			dialer := &net.Dialer{Timeout: c.regionReadTimeout}
 			conn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, fmt.Errorf("tcp dial failed to %s: %w", addr, err)
 			}
 
-			err = c.krbClient.PerformSASLHandshake(conn, c.krbAuthSPN)
+			// 3. Use the dynamic SPN for the handshake
+			err = c.krbClient.PerformSASLHandshake(conn, dynamicSPN)
 			if err != nil {
 				conn.Close()
-				return nil, fmt.Errorf("kerberos sasl handshake failed for %s: %w", c.krbAuthSPN, err)
+				return nil, fmt.Errorf("kerberos sasl handshake failed for %s: %w", dynamicSPN, err)
 			}
 
 			return conn, nil
 		}
-
-		c.logger.Info("Kerberos region dialer configured", "SPN", spn)
 	}
 }
 
