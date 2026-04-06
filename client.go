@@ -175,20 +175,16 @@ func newClient(zkquorum string, options ...Option) *client {
 	return c
 }
 
-func WithKerberosAuth(krbClient auth.KerberosClient, baseService string, realm string) Option {
+func WithKerberosAuth(krbClient auth.KerberosClient, baseService string) Option {
 	return func(c *client) {
 		c.krbClient = krbClient
 
 		c.regionDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// 1. Extract hostname from "hostname:port"
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
-				// Fallback if addr doesn't have a port
 				host = addr
 			}
 
-			// 2. Construct the exact SPN for THIS specific connection
-			// Example: "hbase/node-01.example.com@EXAMPLE.COM"
 			dynamicSPN := fmt.Sprintf("%s/%s", baseService, host)
 
 			dialer := &net.Dialer{Timeout: c.regionReadTimeout}
@@ -197,7 +193,12 @@ func WithKerberosAuth(krbClient auth.KerberosClient, baseService string, realm s
 				return nil, fmt.Errorf("tcp dial failed to %s: %w", addr, err)
 			}
 
-			// 3. Use the dynamic SPN for the handshake
+			preamble := []byte{'H', 'B', 'a', 's', 0, 81}
+			if _, err := conn.Write(preamble); err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("failed to write hbase preamble: %w", err)
+			}
+
 			err = c.krbClient.PerformSASLHandshake(conn, dynamicSPN)
 			if err != nil {
 				conn.Close()
@@ -206,6 +207,8 @@ func WithKerberosAuth(krbClient auth.KerberosClient, baseService string, realm s
 
 			return conn, nil
 		}
+
+		c.logger.Info("Kerberos region dialer configured", "baseService", baseService)
 	}
 }
 
