@@ -189,7 +189,7 @@ func WithKerberosAuth(krbClient auth.KerberosClient, baseService string, realm s
 
 			// 2. Construct the exact SPN for THIS specific connection
 			// Example: "hbase/node-01.example.com@EXAMPLE.COM"
-			dynamicSPN := fmt.Sprintf("%s/%s@%s", baseService, host, realm)
+			dynamicSPN := fmt.Sprintf("%s/%s", baseService, host)
 
 			dialer := &net.Dialer{Timeout: c.regionReadTimeout}
 			conn, err := dialer.DialContext(ctx, network, addr)
