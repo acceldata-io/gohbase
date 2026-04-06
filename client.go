@@ -175,7 +175,7 @@ func newClient(zkquorum string, options ...Option) *client {
 	return c
 }
 
-func WithKerberosAuth(krbClient auth.KerberosClient, baseService, realm string) Option {
+func WithKerberosAuth(krbClient auth.KerberosClient, baseService string, realm string) Option {
 	return func(c *client) {
 		c.krbClient = krbClient
 
