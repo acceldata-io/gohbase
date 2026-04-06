@@ -1,10 +1,12 @@
 package auth
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"github.com/jcmturner/gokrb5/v8/client"
 	"github.com/jcmturner/gokrb5/v8/config"
@@ -14,7 +16,7 @@ import (
 
 // KerberosClient defines the interface expected by the HBase client.
 type KerberosClient interface {
-	PerformSASLHandshake(conn net.Conn, spn string) error
+	PerformSASLHandshake(ctx context.Context, conn net.Conn, spn string) error
 	RenewTicket() error
 	Close()
 }
@@ -25,22 +27,18 @@ type krbAuth struct {
 
 // NewKerberosClient initializes the gokrb5 client using a krb5.conf file and a keytab.
 func NewKerberosClient(krb5ConfPath, keytabPath, principal, realm string) (KerberosClient, error) {
-	// 1. Load Kerberos config
 	cfg, err := config.Load(krb5ConfPath)
 	if err != nil {
 		return nil, fmt.Errorf("could not load krb5.conf: %w", err)
 	}
 
-	// 2. Load Keytab
 	kt, err := keytab.Load(keytabPath)
 	if err != nil {
 		return nil, fmt.Errorf("could not load keytab: %w", err)
 	}
 
-	// 3. Initialize the client
 	kClient := client.NewWithKeytab(principal, realm, kt, cfg)
 
-	// 4. Perform initial login to get the TGT
 	err = kClient.Login()
 	if err != nil {
 		return nil, fmt.Errorf("kerberos login failed for %s@%s: %w", principal, realm, err)
@@ -51,7 +49,6 @@ func NewKerberosClient(krb5ConfPath, keytabPath, principal, realm string) (Kerbe
 	}, nil
 }
 
-// writeSASLToken prefixes the token with a 4-byte Big-Endian length and writes it to the connection.
 func writeSASLToken(conn net.Conn, token []byte) error {
 	lengthBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lengthBuf, uint32(len(token)))
@@ -65,7 +62,6 @@ func writeSASLToken(conn net.Conn, token []byte) error {
 	return nil
 }
 
-// readSASLToken reads a 4-byte Big-Endian length, then reads exactly that many bytes for the token.
 func readSASLToken(conn net.Conn) ([]byte, error) {
 	lengthBuf := make([]byte, 4)
 	if _, err := io.ReadFull(conn, lengthBuf); err != nil {
@@ -81,47 +77,62 @@ func readSASLToken(conn net.Conn) ([]byte, error) {
 	return token, nil
 }
 
-// PerformSASLHandshake negotiates the GSSAPI/SPNEGO context with the HBase RegionServer/Master.
-func (k *krbAuth) PerformSASLHandshake(conn net.Conn, spn string) error {
+func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn string) error {
+	// Respect context deadlines so the handshake doesn't block forever if the server hangs
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
+		defer conn.SetDeadline(time.Time{}) // Reset after handshake
+	}
+
 	spnegoClient := spnego.SPNEGOClient(k.kClient, spn)
 
-	// 1. Generate the initial security context token
 	st, err := spnegoClient.InitSecContext()
 	if err != nil {
 		return fmt.Errorf("failed to generate initial security token for %s: %w", spn, err)
 	}
 
-	// 2. Marshal the SPNEGO token into bytes
 	b, err := st.Marshal()
 	if err != nil {
 		return fmt.Errorf("failed to marshal SPNEGO token: %w", err)
 	}
 
-	// 3. Send the token to HBase with Hadoop RPC framing
 	if err := writeSASLToken(conn, b); err != nil {
-		return fmt.Errorf("failed to send initial SASL token: %w", err)
+		return fmt.Errorf("failed to send SASL token: %w", err)
 	}
 
-	// 4. Read the server's challenge/response
 	serverResponse, err := readSASLToken(conn)
 	if err != nil {
 		return fmt.Errorf("failed to read SASL challenge from server: %w", err)
 	}
 
-	// 5. Check if further negotiation is required.
-	// For basic "auth" QOP (Quality of Protection), a single exchange is often enough.
-	// If the server requires "auth-int" (integrity) or "auth-conf" (confidentiality),
-	// you would unwrap the serverResponse here and reply.
-	_ = serverResponse
+	var respToken spnego.SPNEGOToken
+	if err := respToken.Unmarshal(serverResponse); err != nil {
+		return fmt.Errorf("failed to unmarshal server SPNEGO response: %w", err)
+	}
 
-	return nil
+	if !respToken.Resp {
+		return fmt.Errorf("expected NegTokenResp from server, got something else")
+	}
+
+	state := respToken.NegTokenResp.State()
+
+	switch state {
+	case spnego.NegStateAcceptCompleted:
+		return nil
+
+	case spnego.NegStateReject:
+		return fmt.Errorf("kerberos negotiation rejected by server")
+
+	case spnego.NegStateAcceptIncomplete:
+		return fmt.Errorf("server requested multi-step SPNEGO which is unhandled")
+
+	default:
+		return fmt.Errorf("unknown SPNEGO negotiation state from server: %v", state)
+	}
 }
 
 // RenewTicket explicitly requests a new TGT.
 func (k *krbAuth) RenewTicket() error {
-	// Note: kClient.Login() fetches a completely new ticket.
-	// To prevent memory leaks or excessive requests, ensure this is only called
-	// when the ticket is actually close to expiring.
 	err := k.kClient.Login()
 	if err != nil {
 		return fmt.Errorf("failed to renew kerberos ticket: %w", err)

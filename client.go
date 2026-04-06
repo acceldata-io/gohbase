@@ -199,7 +199,7 @@ func WithKerberosAuth(krbClient auth.KerberosClient, baseService string) Option 
 				return nil, fmt.Errorf("failed to write hbase preamble: %w", err)
 			}
 
-			err = c.krbClient.PerformSASLHandshake(conn, dynamicSPN)
+			err = c.krbClient.PerformSASLHandshake(ctx, conn, dynamicSPN)
 			if err != nil {
 				conn.Close()
 				return nil, fmt.Errorf("kerberos sasl handshake failed for %s: %w", dynamicSPN, err)
