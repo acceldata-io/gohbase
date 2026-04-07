@@ -16,6 +16,7 @@ import (
 	"github.com/jcmturner/gokrb5/v8/types"
 )
 
+// KerberosClient defines the interface for HBase authentication.
 type KerberosClient interface {
 	PerformSASLHandshake(ctx context.Context, conn net.Conn, spn string) error
 	Close()
@@ -46,23 +47,23 @@ func NewKerberosClient(krb5ConfPath, keytabPath, principal, realm string) (Kerbe
 }
 
 func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn string) error {
-	fmt.Println(">>>> RUNNING NEW RAW GSSAPI CODE <<<<")
 	if deadline, ok := ctx.Deadline(); ok {
 		conn.SetDeadline(deadline)
 		defer conn.SetDeadline(time.Time{})
 	}
+
+	fmt.Println(">>>> RUNNING NEW RAW GSSAPI CODE (WITH TOK_ID) <<<<")
+
 	tkt, sessionKey, err := k.kClient.GetServiceTicket(spn)
 	if err != nil {
 		return fmt.Errorf("failed to get service ticket for %s: %w", spn, err)
 	}
 
-	// 1a. Create the Authenticator
 	auth, err := types.NewAuthenticator(k.kClient.Credentials.Realm(), k.kClient.Credentials.CName())
 	if err != nil {
 		return fmt.Errorf("failed to create authenticator: %w", err)
 	}
 
-	// 1b. Generate the AP-REQ
 	apReq, err := messages.NewAPReq(tkt, sessionKey, auth)
 	if err != nil {
 		return fmt.Errorf("failed to create AP-REQ: %w", err)
@@ -73,8 +74,12 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 	}
 
 	oid := []byte{0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x12, 0x01, 0x02, 0x02}
-	gssapiToken := append([]byte{0x60}, encodeLength(len(oid)+len(apReqBytes))...)
+
+	tokID := []byte{0x01, 0x00}
+
+	gssapiToken := append([]byte{0x60}, encodeLength(len(oid)+len(tokID)+len(apReqBytes))...)
 	gssapiToken = append(gssapiToken, oid...)
+	gssapiToken = append(gssapiToken, tokID...) // Insert the 2-byte Token ID here!
 	gssapiToken = append(gssapiToken, apReqBytes...)
 
 	if err := writeToken(conn, gssapiToken); err != nil {
