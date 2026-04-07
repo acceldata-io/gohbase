@@ -710,6 +710,10 @@ func (c *client) sendHello() error {
 	return c.write(buf)
 }
 
+func (c *client) SetAuthType(authType string) {
+	c.authType = authType
+}
+
 // send sends an RPC out to the wire.
 // Returns the response (for now, as the call is synchronous).
 func (c *client) send(rpc hrpc.Call) (uint32, error) {

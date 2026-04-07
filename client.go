@@ -147,20 +147,28 @@ func newClient(zkquorum string, options ...Option) *client {
 		regionLookupTimeout: region.DefaultLookupTimeout,
 		regionReadTimeout:   region.DefaultReadTimeout,
 		done:                make(chan struct{}),
-		newRegionClientFn: func(addr string, ctype region.ClientType,
-			options *region.RegionClientOptions,
-		) hrpc.RegionClient {
-			return region.NewClient(addr, ctype, options)
-		},
-		logger: slog.Default(),
+		logger:              slog.Default(),
 	}
+
 	for _, option := range options {
 		option(c)
 	}
-	c.logger.Debug("Creating new client.", "Host", slog.StringValue(zkquorum))
 
-	// Have to create the zkClient after the Options have been set
-	// since the zkTimeout could be changed as an option
+	c.newRegionClientFn = func(addr string, ctype region.ClientType,
+		opts *region.RegionClientOptions,
+	) hrpc.RegionClient {
+		rc := region.NewClient(addr, ctype, opts)
+
+		if c.authType == "kerberos" {
+			if kerberizedClient, ok := rc.(interface{ SetAuthType(string) }); ok {
+				kerberizedClient.SetAuthType("kerberos")
+			}
+		}
+
+		return rc
+	}
+
+	c.logger.Debug("Creating new client.", "Host", slog.StringValue(zkquorum))
 	c.zkClient = zk.NewClient(zkquorum, c.zkTimeout, c.zkDialer, c.logger)
 	c.regions = keyRegionCache{
 		logger:  c.logger,
