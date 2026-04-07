@@ -132,18 +132,6 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 				return fmt.Errorf("failed to write client QoP: %w", err)
 			}
 
-			// CRITICAL FIX: Wait for the server to acknowledge success!
-			// An empty 4-byte response (length 0) means the SASL handshake is fully completed.
-			finalAck, err := readToken(conn)
-			if err != nil {
-				return fmt.Errorf("failed to read final SASL ack: %w", err)
-			}
-
-			if len(finalAck) > 0 {
-				return fmt.Errorf("server rejected SASL handshake! received %d bytes instead of empty ack", len(finalAck))
-			}
-
-			// Handshake complete! Safe to return to gohbase.
 			return nil
 		}
 
