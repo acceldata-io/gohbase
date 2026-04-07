@@ -88,9 +88,9 @@ var (
 )
 
 const (
-	//DefaultLookupTimeout is the default region lookup timeout
+	// DefaultLookupTimeout is the default region lookup timeout
 	DefaultLookupTimeout = 30 * time.Second
-	//DefaultReadTimeout is the default region read timeout
+	// DefaultReadTimeout is the default region read timeout
 	DefaultReadTimeout = 30 * time.Second
 	// DefaultRPCQueueSize is the default size of the RPC queue
 	DefaultRPCQueueSize = 100
@@ -210,6 +210,8 @@ type client struct {
 
 	// batch requests concurrency control
 	batchRequestsTokenBucket *Token
+
+	authType string
 }
 
 // QueueRPC will add an rpc call to the queue for processing by the writer goroutine
@@ -646,7 +648,8 @@ func (c *client) receive(r io.Reader) (err error) {
 
 		if int(nread) < len(b) {
 			err = RetryableError{
-				fmt.Errorf("short read: buffer length %d, read %d", len(b), nread)}
+				fmt.Errorf("short read: buffer length %d, read %d", len(b), nread),
+			}
 			return
 		}
 	}
@@ -681,20 +684,29 @@ func (c *client) sendHello() error {
 		CellBlockCodecClass: proto.String("org.apache.hadoop.hbase.codec.KeyValueCodec"),
 	}
 	if c.compressor != nil {
-		// if we have compression enabled, specify the compressor class
 		connHeader.CellBlockCompressorClass = proto.String(c.compressor.CellBlockCompressorClass())
 	}
+
 	data, err := proto.Marshal(connHeader)
 	if err != nil {
 		return fmt.Errorf("failed to marshal connection header: %s", err)
 	}
 
-	const header = "HBas\x00\x50" // \x50 = Simple Auth.
+	var header []byte
+	// If NOT Kerberos, we must prepend the standard simple auth preamble.
+	// If Kerberos IS active, the custom dialer already wrote the secure preamble.
+	if c.authType != "kerberos" {
+		header = []byte("HBas\x00\x50")
+	}
+
+	// Buffer format: [Header (Optional)] + [4-byte Length] + [Protobuf Data]
 	buf := make([]byte, 0, len(header)+4+len(data))
 	buf = append(buf, header...)
-	buf = buf[:len(header)+4]
-	binary.BigEndian.PutUint32(buf[6:], uint32(len(data)))
+	buf = append(buf, 0, 0, 0, 0) // Placeholder for length
+
+	binary.BigEndian.PutUint32(buf[len(header):], uint32(len(data)))
 	buf = append(buf, data...)
+
 	return c.write(buf)
 }
 
@@ -773,7 +785,8 @@ func returnHeader(header *pb.RequestHeader) {
 var pbTrue = proto.Bool(true)
 
 func marshalProto(rpc hrpc.Call, callID uint32, request proto.Message,
-	cellblocksLen uint32) ([]byte, error) {
+	cellblocksLen uint32,
+) ([]byte, error) {
 	header := getHeader()
 	defer returnHeader(header)
 	header.MethodName = proto.String(rpc.Name())
@@ -846,7 +859,6 @@ func marshalProto(rpc hrpc.Call, callID uint32, request proto.Message,
 }
 
 func (c *client) MarshalJSON() ([]byte, error) {
-
 	type Address struct {
 		Network string
 		Address string
@@ -938,7 +950,6 @@ func (c *client) controlLoop() {
 
 			// Send the get request
 			err = c.trySend(get)
-
 			if err != nil {
 				c.logger.Debug("ping send failure", "err", err)
 				continue

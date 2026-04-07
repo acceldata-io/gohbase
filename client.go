@@ -1,7 +1,5 @@
 // Copyright (C) 2015  The GoHBase Authors.  All rights reserved.
-// This file is part of GoHBase.
-// Use of this source code is governed by the Apache License 2.0
-// that can be found in the COPYING file.
+// This file is part of GoHBase. Use of this source code is governed by the Apache License 2.0 that can be found in the COPYING file.
 
 package gohbase
 
@@ -123,6 +121,7 @@ type client struct {
 	krbClient auth.KerberosClient
 
 	krbAuthSPN string
+	authType   string
 }
 
 // NewClient creates a new HBase client.
@@ -177,6 +176,7 @@ func newClient(zkquorum string, options ...Option) *client {
 
 func WithKerberosAuth(krbClient auth.KerberosClient, baseService string) Option {
 	return func(c *client) {
+		c.authType = "kerberos"
 		c.krbClient = krbClient
 
 		c.regionDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -184,31 +184,28 @@ func WithKerberosAuth(krbClient auth.KerberosClient, baseService string) Option 
 			if err != nil {
 				host = addr
 			}
-
 			dynamicSPN := fmt.Sprintf("%s/%s", baseService, host)
 
 			dialer := &net.Dialer{Timeout: c.regionReadTimeout}
 			conn, err := dialer.DialContext(ctx, network, addr)
 			if err != nil {
-				return nil, fmt.Errorf("tcp dial failed to %s: %w", addr, err)
+				return nil, err
 			}
 
-			preamble := []byte{'H', 'B', 'a', 's', 0, 81}
-			if _, err := conn.Write(preamble); err != nil {
+			// Secure Preamble (81 indicates SASL)
+			if _, err := conn.Write([]byte{'H', 'B', 'a', 's', 0, 81}); err != nil {
 				conn.Close()
-				return nil, fmt.Errorf("failed to write hbase preamble: %w", err)
+				return nil, err
 			}
 
-			err = c.krbClient.PerformSASLHandshake(ctx, conn, dynamicSPN)
-			if err != nil {
+			// Execute SASL Handshake
+			if err := c.krbClient.PerformSASLHandshake(ctx, conn, dynamicSPN); err != nil {
 				conn.Close()
-				return nil, fmt.Errorf("kerberos sasl handshake failed for %s: %w", dynamicSPN, err)
+				return nil, err
 			}
 
 			return conn, nil
 		}
-
-		c.logger.Info("Kerberos region dialer configured", "baseService", baseService)
 	}
 }
 

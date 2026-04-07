@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -11,13 +12,12 @@ import (
 	"github.com/jcmturner/gokrb5/v8/client"
 	"github.com/jcmturner/gokrb5/v8/config"
 	"github.com/jcmturner/gokrb5/v8/keytab"
-	"github.com/jcmturner/gokrb5/v8/spnego"
+	"github.com/jcmturner/gokrb5/v8/messages"
+	"github.com/jcmturner/gokrb5/v8/types"
 )
 
-// KerberosClient defines the interface expected by the HBase client.
 type KerberosClient interface {
 	PerformSASLHandshake(ctx context.Context, conn net.Conn, spn string) error
-	RenewTicket() error
 	Close()
 }
 
@@ -25,124 +25,116 @@ type krbAuth struct {
 	kClient *client.Client
 }
 
-// NewKerberosClient initializes the gokrb5 client using a krb5.conf file and a keytab.
+// NewKerberosClient initializes the gokrb5 client from a keytab.
 func NewKerberosClient(krb5ConfPath, keytabPath, principal, realm string) (KerberosClient, error) {
 	cfg, err := config.Load(krb5ConfPath)
 	if err != nil {
-		return nil, fmt.Errorf("could not load krb5.conf: %w", err)
+		return nil, fmt.Errorf("failed to load krb5.conf: %w", err)
 	}
 
 	kt, err := keytab.Load(keytabPath)
 	if err != nil {
-		return nil, fmt.Errorf("could not load keytab: %w", err)
+		return nil, fmt.Errorf("failed to load keytab: %w", err)
 	}
 
 	kClient := client.NewWithKeytab(principal, realm, kt, cfg)
-
-	err = kClient.Login()
-	if err != nil {
-		return nil, fmt.Errorf("kerberos login failed for %s@%s: %w", principal, realm, err)
+	if err := kClient.Login(); err != nil {
+		return nil, fmt.Errorf("kerberos login failed: %w", err)
 	}
 
-	return &krbAuth{
-		kClient: kClient,
-	}, nil
-}
-
-func writeSASLToken(conn net.Conn, token []byte) error {
-	lengthBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lengthBuf, uint32(len(token)))
-
-	if _, err := conn.Write(lengthBuf); err != nil {
-		return fmt.Errorf("failed to write token length: %w", err)
-	}
-	if _, err := conn.Write(token); err != nil {
-		return fmt.Errorf("failed to write token: %w", err)
-	}
-	return nil
-}
-
-func readSASLToken(conn net.Conn) ([]byte, error) {
-	lengthBuf := make([]byte, 4)
-	if _, err := io.ReadFull(conn, lengthBuf); err != nil {
-		return nil, fmt.Errorf("failed to read token length: %w", err)
-	}
-
-	length := binary.BigEndian.Uint32(lengthBuf)
-	token := make([]byte, length)
-	if _, err := io.ReadFull(conn, token); err != nil {
-		return nil, fmt.Errorf("failed to read token: %w", err)
-	}
-
-	return token, nil
+	return &krbAuth{kClient: kClient}, nil
 }
 
 func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn string) error {
-	// Respect context deadlines so the handshake doesn't block forever if the server hangs
 	if deadline, ok := ctx.Deadline(); ok {
 		conn.SetDeadline(deadline)
-		defer conn.SetDeadline(time.Time{}) // Reset after handshake
+		defer conn.SetDeadline(time.Time{})
 	}
-
-	spnegoClient := spnego.SPNEGOClient(k.kClient, spn)
-
-	st, err := spnegoClient.InitSecContext()
+	tkt, sessionKey, err := k.kClient.GetServiceTicket(spn)
 	if err != nil {
-		return fmt.Errorf("failed to generate initial security token for %s: %w", spn, err)
+		return fmt.Errorf("failed to get service ticket for %s: %w", spn, err)
 	}
 
-	b, err := st.Marshal()
+	// 1a. Create the Authenticator
+	auth, err := types.NewAuthenticator(k.kClient.Credentials.Realm(), k.kClient.Credentials.CName())
 	if err != nil {
-		return fmt.Errorf("failed to marshal SPNEGO token: %w", err)
+		return fmt.Errorf("failed to create authenticator: %w", err)
 	}
 
-	if err := writeSASLToken(conn, b); err != nil {
-		return fmt.Errorf("failed to send SASL token: %w", err)
-	}
-
-	serverResponse, err := readSASLToken(conn)
+	// 1b. Generate the AP-REQ
+	apReq, err := messages.NewAPReq(tkt, sessionKey, auth)
 	if err != nil {
-		return fmt.Errorf("failed to read SASL challenge from server: %w", err)
+		return fmt.Errorf("failed to create AP-REQ: %w", err)
 	}
-
-	var respToken spnego.SPNEGOToken
-	if err := respToken.Unmarshal(serverResponse); err != nil {
-		return fmt.Errorf("failed to unmarshal server SPNEGO response: %w", err)
-	}
-
-	if !respToken.Resp {
-		return fmt.Errorf("expected NegTokenResp from server, got something else")
-	}
-
-	state := respToken.NegTokenResp.State()
-
-	switch state {
-	case spnego.NegStateAcceptCompleted:
-		return nil
-
-	case spnego.NegStateReject:
-		return fmt.Errorf("kerberos negotiation rejected by server")
-
-	case spnego.NegStateAcceptIncomplete:
-		return fmt.Errorf("server requested multi-step SPNEGO which is unhandled")
-
-	default:
-		return fmt.Errorf("unknown SPNEGO negotiation state from server: %v", state)
-	}
-}
-
-// RenewTicket explicitly requests a new TGT.
-func (k *krbAuth) RenewTicket() error {
-	err := k.kClient.Login()
+	apReqBytes, err := apReq.Marshal()
 	if err != nil {
-		return fmt.Errorf("failed to renew kerberos ticket: %w", err)
+		return err
 	}
+
+	oid := []byte{0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x12, 0x01, 0x02, 0x02}
+	gssapiToken := append([]byte{0x60}, encodeLength(len(oid)+len(apReqBytes))...)
+	gssapiToken = append(gssapiToken, oid...)
+	gssapiToken = append(gssapiToken, apReqBytes...)
+
+	if err := writeToken(conn, gssapiToken); err != nil {
+		return fmt.Errorf("failed to send GSSAPI token: %w", err)
+	}
+
+	_, err = readToken(conn)
+	if err != nil {
+		return fmt.Errorf("failed to read AP-REP: %w", err)
+	}
+
+	_, err = readToken(conn)
+	if err != nil {
+		return fmt.Errorf("failed to read QoP challenge: %w", err)
+	}
+
+	qopResponse := []byte{0x01, 0x00, 0x00, 0x00}
+	if err := writeToken(conn, qopResponse); err != nil {
+		return fmt.Errorf("failed to write QoP response: %w", err)
+	}
+
 	return nil
 }
 
-// Close gracefully destroys the Kerberos client session.
 func (k *krbAuth) Close() {
 	if k.kClient != nil {
 		k.kClient.Destroy()
 	}
+}
+
+func writeToken(conn net.Conn, token []byte) error {
+	buf := make([]byte, 4+len(token))
+	binary.BigEndian.PutUint32(buf[:4], uint32(len(token)))
+	copy(buf[4:], token)
+	_, err := conn.Write(buf)
+	return err
+}
+
+func readToken(conn net.Conn) ([]byte, error) {
+	lenBuf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, lenBuf); err != nil {
+		return nil, err
+	}
+	length := binary.BigEndian.Uint32(lenBuf)
+	token := make([]byte, length)
+	_, err := io.ReadFull(conn, token)
+	return token, err
+}
+
+func encodeLength(length int) []byte {
+	if length <= 127 {
+		return []byte{byte(length)}
+	}
+	var buf bytes.Buffer
+	for length > 0 {
+		buf.WriteByte(byte(length & 0xff))
+		length >>= 8
+	}
+	b := buf.Bytes()
+	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
+		b[i], b[j] = b[j], b[i]
+	}
+	return append([]byte{byte(0x80 | len(b))}, b...)
 }
