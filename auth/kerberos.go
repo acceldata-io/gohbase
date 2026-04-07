@@ -52,22 +52,17 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 		defer conn.SetDeadline(time.Time{})
 	}
 
-	fmt.Println(">>>> RUNNING MANUAL GSSAPI (SEQ=0) & FINAL ACK WAIT <<<<")
-
-	// 1. Get Service Ticket
 	tkt, sessionKey, err := k.kClient.GetServiceTicket(spn)
 	if err != nil {
 		return fmt.Errorf("failed to get service ticket for %s: %w", spn, err)
 	}
 
-	// 2. Create Authenticator and force SeqNumber to 0 to prevent "Gap token"
 	auth, err := types.NewAuthenticator(k.kClient.Credentials.Realm(), k.kClient.Credentials.CName())
 	if err != nil {
 		return fmt.Errorf("failed to create authenticator: %w", err)
 	}
 	auth.SeqNumber = 0
 
-	// Add the mandatory GSSAPI 0x8003 Checksum (Mutual + Replay + Sequence flags)
 	auth.Cksum = types.Checksum{
 		CksumType: 0x8003,
 		Checksum: []byte{
@@ -77,7 +72,6 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 		},
 	}
 
-	// 3. Generate the AP-REQ
 	apReq, err := messages.NewAPReq(tkt, sessionKey, auth)
 	if err != nil {
 		return fmt.Errorf("failed to create AP-REQ: %w", err)
@@ -87,7 +81,6 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 		return err
 	}
 
-	// 4. Wrap in GSSAPI Framing (OID + 0x0100 TOK_ID)
 	oid := []byte{0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x12, 0x01, 0x02, 0x02}
 	tokID := []byte{0x01, 0x00}
 	gssapiToken := append([]byte{0x60}, encodeLength(len(oid)+len(tokID)+len(apReqBytes))...)
@@ -99,7 +92,6 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 		return fmt.Errorf("failed to send GSSAPI token: %w", err)
 	}
 
-	// 5. Ping-Pong Loop
 	for {
 		resp, err := readToken(conn)
 		if err != nil {
@@ -112,12 +104,10 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 
 		var serverQoP gssapi.WrapToken
 		if err := serverQoP.Unmarshal(resp, true); err == nil {
-			// It IS a WrapToken! Verify it.
 			if _, err := serverQoP.Verify(sessionKey, keyusage.GSSAPI_ACCEPTOR_SEAL); err != nil {
 				return fmt.Errorf("failed to verify server QoP challenge: %w", err)
 			}
 
-			// Wrap and Send Client QoP Response
 			clientQoP, err := gssapi.NewInitiatorWrapToken(serverQoP.Payload, sessionKey)
 			if err != nil {
 				return fmt.Errorf("failed to create client QoP: %w", err)
@@ -135,7 +125,6 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 			return nil
 		}
 
-		// Not a WrapToken -> It's the AP-REP. Send empty byte array to prompt the QoP Challenge.
 		if err := writeToken(conn, []byte{}); err != nil {
 			return fmt.Errorf("failed to send empty AP-REP ack: %w", err)
 		}
@@ -147,8 +136,6 @@ func (k *krbAuth) Close() {
 		k.kClient.Destroy()
 	}
 }
-
-// --- Helpers ---
 
 func writeToken(conn net.Conn, token []byte) error {
 	buf := make([]byte, 4+len(token))
