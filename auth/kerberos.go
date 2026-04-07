@@ -46,6 +46,7 @@ func NewKerberosClient(krb5ConfPath, keytabPath, principal, realm string) (Kerbe
 }
 
 func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn string) error {
+	fmt.Println(">>>> RUNNING NEW RAW GSSAPI CODE <<<<")
 	if deadline, ok := ctx.Deadline(); ok {
 		conn.SetDeadline(deadline)
 		defer conn.SetDeadline(time.Time{})
