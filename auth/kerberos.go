@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -13,10 +14,10 @@ import (
 	"github.com/jcmturner/gokrb5/v8/gssapi"
 	"github.com/jcmturner/gokrb5/v8/iana/keyusage"
 	"github.com/jcmturner/gokrb5/v8/keytab"
-	"github.com/jcmturner/gokrb5/v8/spnego"
+	"github.com/jcmturner/gokrb5/v8/messages"
+	"github.com/jcmturner/gokrb5/v8/types"
 )
 
-// KerberosClient defines the interface for HBase authentication.
 type KerberosClient interface {
 	PerformSASLHandshake(ctx context.Context, conn net.Conn, spn string) error
 	Close()
@@ -26,7 +27,6 @@ type krbAuth struct {
 	kClient *client.Client
 }
 
-// NewKerberosClient initializes the gokrb5 client from a keytab.
 func NewKerberosClient(krb5ConfPath, keytabPath, principal, realm string) (KerberosClient, error) {
 	cfg, err := config.Load(krb5ConfPath)
 	if err != nil {
@@ -52,32 +52,54 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 		defer conn.SetDeadline(time.Time{})
 	}
 
-	fmt.Println(">>>> RUNNING PERFECT GSSAPI & QoP PING-PONG <<<<")
+	fmt.Println(">>>> RUNNING MANUAL GSSAPI (SEQ=0) & FINAL ACK WAIT <<<<")
 
-	// 1. Get the Service Ticket and Session Key
+	// 1. Get Service Ticket
 	tkt, sessionKey, err := k.kClient.GetServiceTicket(spn)
 	if err != nil {
 		return fmt.Errorf("failed to get service ticket for %s: %w", spn, err)
 	}
 
-	// 2. Generate a fully-formed GSSAPI AP-REQ Token (automatically includes 0x8003 Checksum & framing)
-	gssapiFlags := []int{gssapi.ContextFlagMutual, gssapi.ContextFlagReplay, gssapi.ContextFlagInteg}
-	krb5Token, err := spnego.NewKRB5TokenAPREQ(k.kClient, tkt, sessionKey, gssapiFlags, []int{})
+	// 2. Create Authenticator and force SeqNumber to 0 to prevent "Gap token"
+	auth, err := types.NewAuthenticator(k.kClient.Credentials.Realm(), k.kClient.Credentials.CName())
 	if err != nil {
-		return fmt.Errorf("failed to create KRB5 GSSAPI token: %w", err)
+		return fmt.Errorf("failed to create authenticator: %w", err)
+	}
+	auth.SeqNumber = 0
+
+	// Add the mandatory GSSAPI 0x8003 Checksum (Mutual + Replay + Sequence flags)
+	auth.Cksum = types.Checksum{
+		CksumType: 0x8003,
+		Checksum: []byte{
+			0x10, 0x00, 0x00, 0x00, // Length (16)
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Binding
+			0x0e, 0x00, 0x00, 0x00, // Flags
+		},
 	}
 
-	apReqBytes, err := krb5Token.Marshal()
+	// 3. Generate the AP-REQ
+	apReq, err := messages.NewAPReq(tkt, sessionKey, auth)
 	if err != nil {
-		return fmt.Errorf("failed to marshal KRB5 GSSAPI token: %w", err)
+		return fmt.Errorf("failed to create AP-REQ: %w", err)
+	}
+	apReqBytes, err := apReq.Marshal()
+	if err != nil {
+		return err
 	}
 
-	// 3. Send the perfect GSSAPI token to HBase
-	if err := writeToken(conn, apReqBytes); err != nil {
+	// 4. Wrap in GSSAPI Framing (OID + 0x0100 TOK_ID)
+	oid := []byte{0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x12, 0x01, 0x02, 0x02}
+	tokID := []byte{0x01, 0x00}
+	gssapiToken := append([]byte{0x60}, encodeLength(len(oid)+len(tokID)+len(apReqBytes))...)
+	gssapiToken = append(gssapiToken, oid...)
+	gssapiToken = append(gssapiToken, tokID...)
+	gssapiToken = append(gssapiToken, apReqBytes...)
+
+	if err := writeToken(conn, gssapiToken); err != nil {
 		return fmt.Errorf("failed to send GSSAPI token: %w", err)
 	}
 
-	// 4. Handle the Hadoop SASL Ping-Pong Exchange
+	// 5. Ping-Pong Loop
 	for {
 		resp, err := readToken(conn)
 		if err != nil {
@@ -88,40 +110,46 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 			continue
 		}
 
-		// Try to parse the response as a QoP Challenge (WrapToken)
 		var serverQoP gssapi.WrapToken
 		if err := serverQoP.Unmarshal(resp, true); err == nil {
-
-			// It IS a WrapToken! Verify it using our session key.
+			// It IS a WrapToken! Verify it.
 			if _, err := serverQoP.Verify(sessionKey, keyusage.GSSAPI_ACCEPTOR_SEAL); err != nil {
 				return fmt.Errorf("failed to verify server QoP challenge: %w", err)
 			}
 
 			// Wrap and Send Client QoP Response
-			// We echo back the server's payload to accept the parameters (auth only)
 			clientQoP, err := gssapi.NewInitiatorWrapToken(serverQoP.Payload, sessionKey)
 			if err != nil {
-				return fmt.Errorf("failed to create client QoP response: %w", err)
+				return fmt.Errorf("failed to create client QoP: %w", err)
 			}
 
 			clientQoPBytes, err := clientQoP.Marshal()
 			if err != nil {
-				return fmt.Errorf("failed to marshal client QoP response: %w", err)
+				return fmt.Errorf("failed to marshal client QoP: %w", err)
 			}
 
 			if err := writeToken(conn, clientQoPBytes); err != nil {
-				return fmt.Errorf("failed to write client QoP response: %w", err)
+				return fmt.Errorf("failed to write client QoP: %w", err)
 			}
 
-			// Handshake complete! HBase will now accept standard RPC calls.
+			// CRITICAL FIX: Wait for the server to acknowledge success!
+			// An empty 4-byte response (length 0) means the SASL handshake is fully completed.
+			finalAck, err := readToken(conn)
+			if err != nil {
+				return fmt.Errorf("failed to read final SASL ack: %w", err)
+			}
+
+			if len(finalAck) > 0 {
+				return fmt.Errorf("server rejected SASL handshake! received %d bytes instead of empty ack", len(finalAck))
+			}
+
+			// Handshake complete! Safe to return to gohbase.
 			return nil
 		}
 
-		// If we couldn't unmarshal it as a WrapToken, it is the AP-REP (Mutual Auth response).
-		// In Hadoop RPC, the client MUST send an empty byte array back to the server
-		// to acknowledge the AP-REP and trigger the server to send the QoP Challenge.
+		// Not a WrapToken -> It's the AP-REP. Send empty byte array to prompt the QoP Challenge.
 		if err := writeToken(conn, []byte{}); err != nil {
-			return fmt.Errorf("failed to send empty token to trigger QoP: %w", err)
+			return fmt.Errorf("failed to send empty AP-REP ack: %w", err)
 		}
 	}
 }
@@ -155,4 +183,20 @@ func readToken(conn net.Conn) ([]byte, error) {
 	token := make([]byte, length)
 	_, err := io.ReadFull(conn, token)
 	return token, err
+}
+
+func encodeLength(length int) []byte {
+	if length <= 127 {
+		return []byte{byte(length)}
+	}
+	var buf bytes.Buffer
+	for length > 0 {
+		buf.WriteByte(byte(length & 0xff))
+		length >>= 8
+	}
+	b := buf.Bytes()
+	for i, j := 0, len(b)-1; i < j; i, j = i+1, j-1 {
+		b[i], b[j] = b[j], b[i]
+	}
+	return append([]byte{byte(0x80 | len(b))}, b...)
 }
