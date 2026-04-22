@@ -11,6 +11,7 @@ import (
 
 	"github.com/jcmturner/gokrb5/v8/client"
 	"github.com/jcmturner/gokrb5/v8/config"
+	"github.com/jcmturner/gokrb5/v8/credentials" // Added for CCache support
 	"github.com/jcmturner/gokrb5/v8/gssapi"
 	"github.com/jcmturner/gokrb5/v8/iana/keyusage"
 	"github.com/jcmturner/gokrb5/v8/keytab"
@@ -27,7 +28,7 @@ type krbAuth struct {
 	kClient *client.Client
 }
 
-func NewKerberosClient(krb5ConfPath, keytabPath, principal, realm string) (KerberosClient, error) {
+func NewKerberosClientFromKeytab(krb5ConfPath, keytabPath, principal, realm string) (KerberosClient, error) {
 	cfg, err := config.Load(krb5ConfPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load krb5.conf: %w", err)
@@ -41,6 +42,25 @@ func NewKerberosClient(krb5ConfPath, keytabPath, principal, realm string) (Kerbe
 	kClient := client.NewWithKeytab(principal, realm, kt, cfg)
 	if err := kClient.Login(); err != nil {
 		return nil, fmt.Errorf("kerberos login failed: %w", err)
+	}
+
+	return &krbAuth{kClient: kClient}, nil
+}
+
+func NewKerberosClientFromCCache(krb5ConfPath, ccachePath string) (KerberosClient, error) {
+	cfg, err := config.Load(krb5ConfPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load krb5.conf: %w", err)
+	}
+
+	ccache, err := credentials.LoadCCache(ccachePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load ccache from %s: %w", ccachePath, err)
+	}
+
+	kClient, err := client.NewFromCCache(ccache, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create client from ccache: %w", err)
 	}
 
 	return &krbAuth{kClient: kClient}, nil
@@ -66,9 +86,9 @@ func (k *krbAuth) PerformSASLHandshake(ctx context.Context, conn net.Conn, spn s
 	auth.Cksum = types.Checksum{
 		CksumType: 0x8003,
 		Checksum: []byte{
-			0x10, 0x00, 0x00, 0x00, // Length (16)
-			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Binding
-			0x0e, 0x00, 0x00, 0x00, // Flags
+			0x10, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x0e, 0x00, 0x00, 0x00,
 		},
 	}
 
