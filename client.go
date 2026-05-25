@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tsuna/gohbase/auth"
-	"github.com/tsuna/gohbase/compression"
-	"github.com/tsuna/gohbase/hrpc"
-	"github.com/tsuna/gohbase/pb"
-	"github.com/tsuna/gohbase/region"
-	"github.com/tsuna/gohbase/zk"
+	"github.com/acceldata-io/gohbase/auth"
+	"github.com/acceldata-io/gohbase/compression"
+	"github.com/acceldata-io/gohbase/hrpc"
+	"github.com/acceldata-io/gohbase/pb"
+	"github.com/acceldata-io/gohbase/region"
+	"github.com/acceldata-io/gohbase/zk"
 	"google.golang.org/protobuf/proto"
 	"modernc.org/b/v2"
 )

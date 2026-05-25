@@ -1,4 +1,4 @@
-module github.com/tsuna/gohbase
+module github.com/acceldata-io/gohbase
 
 go 1.24.3
 

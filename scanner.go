@@ -15,8 +15,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/tsuna/gohbase/hrpc"
-	"github.com/tsuna/gohbase/pb"
+	"github.com/acceldata-io/gohbase/hrpc"
+	"github.com/acceldata-io/gohbase/pb"
 )
 
 const (

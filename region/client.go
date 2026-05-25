@@ -22,8 +22,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/tsuna/gohbase/hrpc"
-	"github.com/tsuna/gohbase/pb"
+	"github.com/acceldata-io/gohbase/hrpc"
+	"github.com/acceldata-io/gohbase/pb"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )

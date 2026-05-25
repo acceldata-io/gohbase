@@ -13,9 +13,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/tsuna/gohbase/hrpc"
-	"github.com/tsuna/gohbase/region"
-	mockRegion "github.com/tsuna/gohbase/test/mock/region"
+	mockRegion "github.com/acceldata-io/gohbase/test/mock/region"
+	"github.com/acceldata-io/gohbase/hrpc"
+	"github.com/acceldata-io/gohbase/region"
 	"go.uber.org/mock/gomock"
 )
 
@@ -332,7 +332,8 @@ func TestRegionCacheAge(t *testing.T) {
 					1, nil, []byte("hello"),
 					[]byte("hello,foo,1.swagswagswagswagswagswagswagswag."),
 					[]byte("foo"), []byte(""),
-				)},
+				),
+			},
 			newRegion: region.NewInfo(
 				2, nil, []byte("hello"),
 				[]byte("hello,,2.meowmemowmeowmemowmeowmemowmeow."),
@@ -351,7 +352,8 @@ func TestRegionCacheAge(t *testing.T) {
 					2, nil, []byte("hello"),
 					[]byte("hello,foo,2.swagswagswagswagswagswagswagswag."),
 					[]byte("foo"), []byte(""),
-				)},
+				),
+			},
 			newRegion: region.NewInfo(
 				1, nil, []byte("hello"),
 				[]byte("hello,,1.meowmemowmeowmemowmeowmemowmeow."),
@@ -370,7 +372,8 @@ func TestRegionCacheAge(t *testing.T) {
 					3, nil, []byte("hello"),
 					[]byte("hello,foo,3.swagswagswagswagswagswagswagswag."),
 					[]byte("foo"), []byte(""),
-				)},
+				),
+			},
 			newRegion: region.NewInfo(
 				2, nil, []byte("hello"),
 				[]byte("hello,,1.meowmemowmeowmemowmeowmemowmeow."),

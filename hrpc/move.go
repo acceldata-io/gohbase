@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tsuna/gohbase/pb"
+	"github.com/acceldata-io/gohbase/pb"
 	"google.golang.org/protobuf/proto"
 )
 

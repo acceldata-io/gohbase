@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/tsuna/gohbase/hrpc"
-	"github.com/tsuna/gohbase/pb"
-	"github.com/tsuna/gohbase/test"
-	"github.com/tsuna/gohbase/test/mock"
+	"github.com/acceldata-io/gohbase/hrpc"
+	"github.com/acceldata-io/gohbase/pb"
+	"github.com/acceldata-io/gohbase/test"
+	"github.com/acceldata-io/gohbase/test/mock"
 	"google.golang.org/protobuf/proto"
 )
 

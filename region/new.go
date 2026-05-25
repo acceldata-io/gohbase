@@ -14,8 +14,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/tsuna/gohbase/compression"
-	"github.com/tsuna/gohbase/hrpc"
+	"github.com/acceldata-io/gohbase/compression"
+	"github.com/acceldata-io/gohbase/hrpc"
 )
 
 // RegionClientOptions holds configuration options for RegionClient
