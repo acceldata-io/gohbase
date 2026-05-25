@@ -9,14 +9,14 @@ import (
 	"net"
 	"time"
 
-	"github.com/jcmturner/gokrb5/v8/client"
-	"github.com/jcmturner/gokrb5/v8/config"
-	"github.com/jcmturner/gokrb5/v8/credentials" // Added for CCache support
-	"github.com/jcmturner/gokrb5/v8/gssapi"
-	"github.com/jcmturner/gokrb5/v8/iana/keyusage"
-	"github.com/jcmturner/gokrb5/v8/keytab"
-	"github.com/jcmturner/gokrb5/v8/messages"
-	"github.com/jcmturner/gokrb5/v8/types"
+	"github.com/acceldata-io/gokrb5/client"
+	"github.com/acceldata-io/gokrb5/config"
+	"github.com/acceldata-io/gokrb5/credentials" // Added for CCache support
+	"github.com/acceldata-io/gokrb5/gssapi"
+	"github.com/acceldata-io/gokrb5/iana/keyusage"
+	"github.com/acceldata-io/gokrb5/keytab"
+	"github.com/acceldata-io/gokrb5/messages"
+	"github.com/acceldata-io/gokrb5/types"
 )
 
 type KerberosClient interface {
