@@ -12,10 +12,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/tsuna/gohbase/hrpc"
-	"github.com/tsuna/gohbase/pb"
-	"github.com/tsuna/gohbase/region"
-	"github.com/tsuna/gohbase/zk"
+	"github.com/acceldata-io/gohbase/hrpc"
+	"github.com/acceldata-io/gohbase/pb"
+	"github.com/acceldata-io/gohbase/region"
+	"github.com/acceldata-io/gohbase/zk"
 )
 
 const (

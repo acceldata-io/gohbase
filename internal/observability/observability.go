@@ -9,7 +9,7 @@ import (
 	"context"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tsuna/gohbase/pb"
+	"github.com/acceldata-io/gohbase/pb"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 )

@@ -8,7 +8,7 @@ package compression
 import (
 	"fmt"
 
-	"github.com/tsuna/gohbase/compression/snappy"
+	"github.com/acceldata-io/gohbase/compression/snappy"
 )
 
 // Codec is used to encode and decode chunks of hadoop's sequence file chunks.

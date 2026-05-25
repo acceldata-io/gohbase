@@ -13,7 +13,7 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/tsuna/gohbase/pb"
+	"github.com/acceldata-io/gohbase/pb"
 	"google.golang.org/protobuf/proto"
 )
 

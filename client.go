@@ -1,7 +1,5 @@
 // Copyright (C) 2015  The GoHBase Authors.  All rights reserved.
-// This file is part of GoHBase.
-// Use of this source code is governed by the Apache License 2.0
-// that can be found in the COPYING file.
+// This file is part of GoHBase. Use of this source code is governed by the Apache License 2.0 that can be found in the COPYING file.
 
 package gohbase
 
@@ -15,11 +13,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tsuna/gohbase/compression"
-	"github.com/tsuna/gohbase/hrpc"
-	"github.com/tsuna/gohbase/pb"
-	"github.com/tsuna/gohbase/region"
-	"github.com/tsuna/gohbase/zk"
+	"github.com/acceldata-io/gohbase/auth"
+	"github.com/acceldata-io/gohbase/compression"
+	"github.com/acceldata-io/gohbase/hrpc"
+	"github.com/acceldata-io/gohbase/pb"
+	"github.com/acceldata-io/gohbase/region"
+	"github.com/acceldata-io/gohbase/zk"
 	"google.golang.org/protobuf/proto"
 	"modernc.org/b/v2"
 )
@@ -117,6 +116,12 @@ type client struct {
 	scanControlOptions *region.ScanControlOptions
 	// batch requests control options for concurrency control
 	batchRequestsControlOptions *region.BatchRequestsControlOptions
+
+	// krbClient
+	krbClient auth.KerberosClient
+
+	krbAuthSPN string
+	authType   string
 }
 
 // NewClient creates a new HBase client.
@@ -142,19 +147,28 @@ func newClient(zkquorum string, options ...Option) *client {
 		regionLookupTimeout: region.DefaultLookupTimeout,
 		regionReadTimeout:   region.DefaultReadTimeout,
 		done:                make(chan struct{}),
-		newRegionClientFn: func(addr string, ctype region.ClientType,
-			options *region.RegionClientOptions) hrpc.RegionClient {
-			return region.NewClient(addr, ctype, options)
-		},
-		logger: slog.Default(),
+		logger:              slog.Default(),
 	}
+
 	for _, option := range options {
 		option(c)
 	}
-	c.logger.Debug("Creating new client.", "Host", slog.StringValue(zkquorum))
 
-	//Have to create the zkClient after the Options have been set
-	//since the zkTimeout could be changed as an option
+	c.newRegionClientFn = func(addr string, ctype region.ClientType,
+		opts *region.RegionClientOptions,
+	) hrpc.RegionClient {
+		rc := region.NewClient(addr, ctype, opts)
+
+		if c.authType == "kerberos" {
+			if kerberizedClient, ok := rc.(interface{ SetAuthType(string) }); ok {
+				kerberizedClient.SetAuthType("kerberos")
+			}
+		}
+
+		return rc
+	}
+
+	c.logger.Debug("Creating new client.", "Host", slog.StringValue(zkquorum))
 	c.zkClient = zk.NewClient(zkquorum, c.zkTimeout, c.zkDialer, c.logger)
 	c.regions = keyRegionCache{
 		logger:  c.logger,
@@ -168,9 +182,43 @@ func newClient(zkquorum string, options ...Option) *client {
 	return c
 }
 
+func WithKerberosAuth(krbClient auth.KerberosClient, baseService string) Option {
+	return func(c *client) {
+		c.authType = "kerberos"
+		c.krbClient = krbClient
+
+		c.regionDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				host = addr
+			}
+			dynamicSPN := fmt.Sprintf("%s/%s", baseService, host)
+
+			dialer := &net.Dialer{Timeout: c.regionReadTimeout}
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			// Secure Preamble (81 indicates SASL)
+			if _, err := conn.Write([]byte{'H', 'B', 'a', 's', 0, 81}); err != nil {
+				conn.Close()
+				return nil, err
+			}
+
+			// Execute SASL Handshake
+			if err := c.krbClient.PerformSASLHandshake(ctx, conn, dynamicSPN); err != nil {
+				conn.Close()
+				return nil, err
+			}
+
+			return conn, nil
+		}
+	}
+}
+
 // DebugState information about the clients keyRegionCache, and clientRegionCache
 func DebugState(c Client) ([]byte, error) {
-
 	debugInfoJson, err := json.Marshal(c)
 	if err != nil {
 		if cclient, ok := c.(*client); ok {
@@ -183,7 +231,6 @@ func DebugState(c Client) ([]byte, error) {
 }
 
 func (c *client) MarshalJSON() ([]byte, error) {
-
 	var done string
 	if c.done != nil {
 		select {
@@ -299,7 +346,8 @@ func CompressionCodec(codec string) Option {
 // into the ZooKeeper client Connect() call, which allows for customizing
 // network connections.
 func ZooKeeperDialer(dialer func(
-	ctx context.Context, network, addr string) (net.Conn, error)) Option {
+	ctx context.Context, network, addr string) (net.Conn, error),
+) Option {
 	return func(c *client) {
 		c.zkDialer = dialer
 	}
@@ -308,7 +356,8 @@ func ZooKeeperDialer(dialer func(
 // RegionDialer will return an option that uses the specified Dialer for
 // connecting to region servers. This allows for connecting through proxies.
 func RegionDialer(dialer func(
-	ctx context.Context, network, addr string) (net.Conn, error)) Option {
+	ctx context.Context, network, addr string) (net.Conn, error),
+) Option {
 	return func(c *client) {
 		c.regionDialer = dialer
 	}
@@ -415,12 +464,14 @@ func (c *client) mutate(m *hrpc.Mutate) (*hrpc.Result, error) {
 }
 
 func (c *client) CheckAndPut(p *hrpc.Mutate, family string,
-	qualifier string, expectedValue []byte) (bool, error) {
+	qualifier string, expectedValue []byte,
+) (bool, error) {
 	return c.CheckAndPutWithCompareType(p, family, qualifier, expectedValue, pb.CompareType_EQUAL)
 }
 
 func (c *client) CheckAndPutWithCompareType(p *hrpc.Mutate, family string,
-	qualifier string, expectedValue []byte, compareType pb.CompareType) (bool, error) {
+	qualifier string, expectedValue []byte, compareType pb.CompareType,
+) (bool, error) {
 	cas, err := hrpc.NewCheckAndPutWithCompareType(
 		p, family, qualifier, expectedValue, compareType)
 	if err != nil {
